@@ -226,7 +226,7 @@ class EMACross(Strategy):
         self.close_all_positions(self.config.instrument_id)
 
 
-def get_decimal_precision(value: Decimal) -> int:
+def get_decimal_precision(value: Decimal) -> int: # TODO add stuff like this to a helper file
     if not value.is_finite():
         raise ValueError(f"Expected a finite Decimal, got {value}.")
 
@@ -242,11 +242,21 @@ def get_decimal_precision(value: Decimal) -> int:
 def create_instrument_from_mt5(
         symbol_info: mt5.SymbolInfo,
         instrument_class: type[Instrument],
-        asset_class: AssetClass,
-        order_commission: float
+        order_commission: float,
+        asset_class: AssetClass | None = None,
+        base_currency: str | None = None,
+        quote_currency: str | None = None
     ) -> Instrument:
-    currency_profit = mt5_lib.get_currency_profit(symbol_info)
-    currency_base = mt5_lib.get_currency_base(symbol_info)
+    currency_profit = (
+        quote_currency
+        if quote_currency is not None
+        else mt5_lib.get_currency_profit(symbol_info)
+    )
+    currency_base = (
+        base_currency
+        if base_currency is not None
+        else mt5_lib.get_currency_base(symbol_info)
+    )
     digits = mt5_lib.get_digits(symbol_info)
     tick_size = mt5_lib.get_trade_tick_size(symbol_info)
     contract_size = mt5_lib.get_trade_contract_size(symbol_info)
@@ -269,10 +279,9 @@ def create_instrument_from_mt5(
             f"decimal places than MT5 digits={digits}."
         )
 
-    return instrument_class(
+    common_kwargs = dict(
         instrument_id=InstrumentId.from_str(f"{symbol_info.name}.SIM"),
         raw_symbol=Symbol(symbol_info.name),
-        asset_class=asset_class,
         quote_currency=Currency.from_str(currency_profit),
         price_precision=digits,
         size_precision=size_precision,
@@ -288,16 +297,24 @@ def create_instrument_from_mt5(
         taker_fee=Decimal(str(order_commission))
     )
 
+    if instrument_class is CurrencyPair:
+        return CurrencyPair(**common_kwargs)
+
+    return instrument_class(**common_kwargs, asset_class=asset_class)
+
 
 def create_fx(
         symbol_info: mt5.SymbolInfo,
         order_commission: float,
+        base_currency: str | None = None,
+        quote_currency: str | None = None,
     ) -> CurrencyPair:
     return create_instrument_from_mt5(
         symbol_info=symbol_info,
         instrument_class=CurrencyPair,
-        asset_class=AssetClass.FX,
-        order_commission=order_commission
+        order_commission=order_commission,
+        base_currency=base_currency,
+        quote_currency=quote_currency
     )
 
 
@@ -365,20 +382,20 @@ def get_backtest_bars(
 def get_conversion_symbol(
     instrument: Instrument,
     account_currency: str,
-) -> str | None:
+) -> tuple[str, bool] | None:
     quote_currency = str(instrument.quote_currency)
 
     if quote_currency == account_currency:
         return None
 
-    direct_symbol = f"{account_currency}{quote_currency}"
-    inverse_symbol = f"{quote_currency}{account_currency}"
+    direct_symbol = f"{quote_currency}{account_currency}"
+    inverse_symbol = f"{account_currency}{quote_currency}"
 
     if mt5.symbol_info(direct_symbol) is not None:
-        return direct_symbol
+        return direct_symbol, False
 
     if mt5.symbol_info(inverse_symbol) is not None:
-        return inverse_symbol
+        return inverse_symbol, True
 
     raise RuntimeError(
         f"No FX conversion pair found for "
@@ -389,14 +406,22 @@ def get_conversion_symbol(
 
 def create_exchange_rate_quotes(
     symbol: str,
-    symbol_info: mt5.SymbolInfo,
     symbol_configs: dict,
+    inverted: bool
 ) -> tuple[Instrument, list[QuoteTick]]:
     symbol_info = mt5_lib.get_symbol_info(symbol)
 
+    base_currency = mt5_lib.get_currency_base(symbol_info)
+    quote_currency = mt5_lib.get_currency_profit(symbol_info)
+
+    if inverted:
+        base_currency, quote_currency = quote_currency, base_currency
+
     instrument = create_fx(
         symbol_info=symbol_info,
-        order_commission=0.0, # TODO find and add reallistic value
+        order_commission=0.00004, # TODO find and add reallistic value TODO fee changes have no affect
+        base_currency=base_currency,
+        quote_currency=quote_currency
     )
 
     candles_df = mt5_lib.collect_candlesticks(
@@ -408,15 +433,24 @@ def create_exchange_rate_quotes(
     quote_ticks = []
     for _, candle in candles_df.iterrows():
         timestamp = pd.Timestamp(candle["datetime"]).value
-        price = instrument.make_price(float(candle["close"]))
+        price = float(candle["close"])
+
+        if inverted:
+            price = 1.0 / price
+
+        price = instrument.make_price(price)
+
+        quote_size = Quantity.from_str(
+            f"{1:.{instrument.size_precision}f}"
+        )
 
         quote_ticks.append(
             QuoteTick(
                 instrument_id=instrument.id,
                 bid_price=price,
                 ask_price=price,
-                bid_size=Quantity.from_int(1),
-                ask_size=Quantity.from_int(1),
+                bid_size=quote_size,
+                ask_size=quote_size,
                 ts_event=timestamp,
                 ts_init=timestamp,
             )
@@ -475,19 +509,28 @@ def run_symbol_backtest(
     backtest_engine.add_data(bars)
 
     account_currency = order_configs["base_currency"]
-    exchange_rate_symbol = get_conversion_symbol(
+    conversion = get_conversion_symbol(
         instrument=instrument,
         account_currency=account_currency,
     )
+    print(
+        f"\n[{symbol}] "
+        f"instrument={instrument.id}, "
+        f"base={instrument.base_currency}, "
+        f"quote={instrument.quote_currency}, "
+        f"account={account_currency}, "
+        f"conversion={conversion}"
+    )
     
-    if exchange_rate_symbol is not None:
+    if conversion is not None:
+        exchange_rate_symbol, inverted = conversion
         (
             exchange_rate_instrument,
             exchange_rate_quotes,
         ) = create_exchange_rate_quotes(
-            symbol=symbol,
-            symbol_info=symbol_info,
-            symbol_configs=symbol_configs
+            symbol=exchange_rate_symbol,
+            symbol_configs=symbol_configs,
+            inverted=inverted
         )
 
         backtest_engine.add_instrument(exchange_rate_instrument)
