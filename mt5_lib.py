@@ -63,25 +63,19 @@ def validate_candles(symbol: str, candles: np.ndarray | None) -> np.ndarray:
 
     return candles
 
-
-def split_date_time(dataframe: pd.DataFrame) -> pd.DataFrame:
+def conver_datetime(dataframe: pd.DataFrame) -> pd.DataFrame:
     dataframe["time"] = pd.to_datetime(dataframe["time"], unit="s", utc=True)
+    dataframe.rename(columns={"time": "datetime"}, inplace=True)
 
-    dataframe.insert(0, "date", dataframe["time"].dt.date)
-    dataframe["time"] = dataframe["time"].dt.time
-    
     return dataframe
 
 
-def combine_date_time(dataframe: pd.DataFrame) -> pd.DataFrame:
-    dataframe["datetime"] = pd.to_datetime(
-        dataframe["date"].astype(str)
-        + " "
-        + dataframe["time"].astype(str),
-        utc=True,
-    )
-
-    return dataframe.sort_values("datetime")
+def split_date_time(dataframe: pd.DataFrame) -> pd.DataFrame:
+    dataframe.insert(1, "date", dataframe["datetime"].dt.date)
+    dataframe.insert(2, "time", dataframe["datetime"].dt.time)
+    dataframe.drop(columns=["datetime"], inplace=True)
+    
+    return dataframe
 
 
 def collect_current_candlesticks(
@@ -108,10 +102,16 @@ def collect_current_candlesticks(
     )
     candles = validate_candles(symbol, candles)
 
-    dataframe = pd.DataFrame(candles)
-    dataframe = split_date_time(dataframe)
+    if len(candles) == 0:
+        raise RuntimeError(
+            f"No live data was returned for {symbol}, "
+            f"using {number_of_candles} candles."
+        )
+
+    candles_df = pd.DataFrame(candles)
+    candles_df = conver_datetime(candles_df)
     
-    return dataframe
+    return candles_df
 
 
 def collect_historical_candlesticks(
@@ -135,14 +135,14 @@ def collect_historical_candlesticks(
 
     if len(candles) == 0:
         raise RuntimeError(
-            f"No historical data was returned for {symbol} "
+            f"No historical data was returned for {symbol}, "
             f"between {start_date} and {end_date}."
         )
 
-    dataframe = pd.DataFrame(candles)
-    dataframe = split_date_time(dataframe)
-
-    return dataframe
+    candles_df = pd.DataFrame(candles)
+    candles_df = conver_datetime(candles_df)
+    
+    return candles_df
 
 
 def collect_candlesticks(
@@ -158,11 +158,6 @@ def collect_candlesticks(
             start_date=historical_start_time,
             end_date=historical_end_time,
         )
-
-        logging.debug(
-            f"Collecting historical candles for {symbol} from "
-            f"{historical_start_time} till {historical_end_time}."
-        )
     else:
         timeframe = symbol_configs["timeframe"]
         number_of_candles = symbol_configs["number_of_candles"]
@@ -170,11 +165,6 @@ def collect_candlesticks(
             symbol=symbol,
             timeframe=timeframe,
             number_of_candles=number_of_candles,
-        )
-
-        logging.debug(
-            f"Collecting {number_of_candles} live candles with "
-            f"widths of {timeframe} for {symbol}."
         )
 
     return candles_df

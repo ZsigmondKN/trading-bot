@@ -165,7 +165,8 @@ def create_ema_df(
 
 
 def log_ema_crosses(ema_df: pd.DataFrame, verbose: bool = False) -> None:
-    ema_df_cross = ema_df[ema_df["ema_cross"]].copy()
+    ema_df_cross = ema_df[ema_df["ema_cross"]]
+    ema_df_cross = mt5_lib.split_date_time(ema_df_cross)
     if not verbose:
         ema_df_cross = ema_df_cross.drop(
             columns=["high", "low", "tick_volume", "spread", "real_volume"]
@@ -183,9 +184,6 @@ def plot_ema_charts(
     ema_period_two: int,
 ) -> None:
     for symbol, symbol_df in ema_df.groupby("symbol"):
-        symbol_df = symbol_df.copy()
-        symbol_df = mt5_lib.combine_date_time(symbol_df)
-
         # Identify gaps between candles
         gap_mask = symbol_df["datetime"].diff() > pd.Timedelta(hours=2)
 

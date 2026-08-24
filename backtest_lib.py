@@ -428,7 +428,6 @@ def create_exchange_rate_quotes(
         symbol=symbol,
         symbol_configs=symbol_configs,
     )
-    candles_df = mt5_lib.combine_date_time(candles_df) # TODO apply inversly
 
     quote_ticks = []
     for _, candle in candles_df.iterrows():
@@ -479,10 +478,9 @@ def run_symbol_backtest(
         symbol=symbol,
         symbol_configs=symbol_configs,
     )
-    candles_df = mt5_lib.combine_date_time(candles_df)
     ema_df = ema_lib.create_ema_df(
         symbol=symbol,
-        candles_df=candles_df.copy(),
+        candles_df=candles_df,
         risk_reward_ratio=order_configs["risk_reward_ratio"],
         ema_period_one=strategy_configs["ema_period_one"],
         ema_period_two=strategy_configs["ema_period_two"],

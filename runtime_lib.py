@@ -89,7 +89,6 @@ def run_strategy(
                 timeframe=timeframe,
                 number_of_candles=1
             )
-            current_candle = mt5_lib.combine_date_time(current_candle)
             current_candle_time = current_candle.iloc[0]["datetime"]
 
             is_new_candle = (
