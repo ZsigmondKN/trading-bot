@@ -271,7 +271,11 @@ def create_instrument_from_mt5(
         volume_max=volume_max
     )
 
-    size_precision = get_decimal_precision(volume_step)
+    # Convert MT5 lot-based volume constraints to Nautilus instrument units.
+    size_increment = volume_step * contract_size
+    min_quantity = volume_min * contract_size
+    max_quantity = volume_max * contract_size
+    size_precision = get_decimal_precision(size_increment)
 
     if get_decimal_precision(tick_size) > digits:
         raise RuntimeError(
@@ -286,13 +290,13 @@ def create_instrument_from_mt5(
         price_precision=digits,
         size_precision=size_precision,
         price_increment=Price.from_str(str(tick_size)),
-        size_increment=Quantity.from_str(str(volume_step)),
+        size_increment=Quantity.from_str(str(size_increment)),
         ts_event=0,
         ts_init=0,
         base_currency=Currency.from_str(currency_base),
         lot_size=Quantity.from_str(str(contract_size)),
-        max_quantity=Quantity.from_str(str(volume_max)),
-        min_quantity=Quantity.from_str(str(volume_min)),
+        max_quantity=Quantity.from_str(str(max_quantity)),
+        min_quantity=Quantity.from_str(str(min_quantity)),
         maker_fee=Decimal(str(order_commission)),
         taker_fee=Decimal(str(order_commission))
     )
@@ -318,7 +322,7 @@ def create_fx(
     )
 
 
-def crate_cfd(
+def create_cfd(
         symbol_info: mt5.SymbolInfo,
         order_commission: float,
     ) -> Cfd:
@@ -349,7 +353,7 @@ def create_instrument(symbol_info: mt5.SymbolInfo, order_configs: dict) -> Instr
         mt5.SYMBOL_CALC_MODE_CFDINDEX,
         mt5.SYMBOL_CALC_MODE_CFDLEVERAGE,
     ):
-        return crate_cfd(
+        return create_cfd(
             symbol_info=symbol_info,
             order_commission=order_configs["cfd_commission_percent"]
         )
@@ -382,20 +386,21 @@ def get_backtest_bars(
 def get_conversion_symbol(
     instrument: Instrument,
     account_currency: str,
-) -> tuple[str, bool] | None:
+) -> str | None:
     quote_currency = str(instrument.quote_currency)
 
     if quote_currency == account_currency:
         return None
 
+    # Use the available MT5 conversion pair. Nautilus handles any required inversion.
     direct_symbol = f"{quote_currency}{account_currency}"
     inverse_symbol = f"{account_currency}{quote_currency}"
 
     if mt5.symbol_info(direct_symbol) is not None:
-        return direct_symbol, False
+        return direct_symbol
 
     if mt5.symbol_info(inverse_symbol) is not None:
-        return inverse_symbol, True
+        return inverse_symbol
 
     raise RuntimeError(
         f"No FX conversion pair found for "
@@ -404,24 +409,15 @@ def get_conversion_symbol(
     )
 
 
-def create_exchange_rate_quotes(
+def load_exchange_rate_data(
     symbol: str,
-    symbol_configs: dict,
-    inverted: bool
+    symbol_configs: dict
 ) -> tuple[Instrument, list[QuoteTick]]:
     symbol_info = mt5_lib.get_symbol_info(symbol)
-
-    base_currency = mt5_lib.get_currency_base(symbol_info)
-    quote_currency = mt5_lib.get_currency_profit(symbol_info)
-
-    if inverted:
-        base_currency, quote_currency = quote_currency, base_currency
 
     instrument = create_fx(
         symbol_info=symbol_info,
         order_commission=0.00004, # TODO find and add reallistic value TODO fee changes have no affect
-        base_currency=base_currency,
-        quote_currency=quote_currency
     )
 
     candles_df = mt5_lib.collect_candlesticks(
@@ -432,12 +428,7 @@ def create_exchange_rate_quotes(
     quote_ticks = []
     for _, candle in candles_df.iterrows():
         timestamp = pd.Timestamp(candle["datetime"]).value
-        price = float(candle["close"])
-
-        if inverted:
-            price = 1.0 / price
-
-        price = instrument.make_price(price)
+        price = instrument.make_price(float(candle["close"]))
 
         quote_size = Quantity.from_str(
             f"{1:.{instrument.size_precision}f}"
@@ -507,28 +498,18 @@ def run_symbol_backtest(
     backtest_engine.add_data(bars)
 
     account_currency = order_configs["base_currency"]
-    conversion = get_conversion_symbol(
+    exchange_rate_symbol  = get_conversion_symbol(
         instrument=instrument,
         account_currency=account_currency,
     )
-    print(
-        f"\n[{symbol}] "
-        f"instrument={instrument.id}, "
-        f"base={instrument.base_currency}, "
-        f"quote={instrument.quote_currency}, "
-        f"account={account_currency}, "
-        f"conversion={conversion}"
-    )
     
-    if conversion is not None:
-        exchange_rate_symbol, inverted = conversion
+    if exchange_rate_symbol  is not None:
         (
             exchange_rate_instrument,
             exchange_rate_quotes,
-        ) = create_exchange_rate_quotes(
+        ) = load_exchange_rate_data(
             symbol=exchange_rate_symbol,
             symbol_configs=symbol_configs,
-            inverted=inverted
         )
 
         backtest_engine.add_instrument(exchange_rate_instrument)

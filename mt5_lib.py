@@ -98,7 +98,7 @@ def collect_current_candlesticks(
         symbol,
         mt5_timeframe,
         initial_candle_index,
-        number_of_candles
+        number_of_candles # TODO add conversion so datetime can be used to calculate candle count
     )
     candles = validate_candles(symbol, candles)
 
