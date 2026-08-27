@@ -64,6 +64,8 @@ class BacktestStatistics:
             )
         )
 
+# TODO make adjustable
+CURRENCY_CONVERSION_FEE = Decimal("0.007")
 
 class EMACrossConfig(StrategyConfig, frozen=True):
     instrument_id: InstrumentId
@@ -74,6 +76,7 @@ class EMACrossConfig(StrategyConfig, frozen=True):
     contract_size: Decimal
     ema_df: pd.DataFrame
     statistics: BacktestStatistics
+    account_currency: Currency
 
 
 class EMACross(Strategy):
@@ -214,8 +217,41 @@ class EMACross(Strategy):
         self.submit_order_list(orders)
         self.stats.orders_submitted += 1
 
+    def _calculate_conversion_adjustment(
+        self,
+        event: PositionClosed,
+    ) -> Money:
+        realized_pnl = event.realized_pnl
+
+        if realized_pnl.currency == self.config.account_currency:
+            return Money(0, self.config.account_currency)
+
+        pnl = Decimal(str(realized_pnl.as_double()))
+
+        adjustment = abs(pnl) * CURRENCY_CONVERSION_FEE
+
+        if pnl > 0:
+            adjustment = -adjustment
+
+        return Money.from_decimal(
+            adjustment,
+            realized_pnl.currency,
+        )
+
     def on_position_closed(self, event: PositionClosed) -> None:
         self.stats.positions_closed += 1
+
+        adjustment = self._calculate_conversion_adjustment(event)
+
+        if adjustment.as_double() == 0:
+            return
+
+        logging.debug(
+            f"Currency conversion adjustment: "
+            f"position={event.position_id}, "
+            f"pnl={event.realized_pnl}, "
+            f"adjustment={adjustment}"
+        )
 
     def on_stop(self) -> None:
         positions = self.cache.positions_open(
@@ -417,7 +453,7 @@ def load_exchange_rate_data(
 
     instrument = create_fx(
         symbol_info=symbol_info,
-        order_commission=0.00004, # TODO find and add reallistic value TODO fee changes have no affect
+        order_commission=0.004, # TODO find and add reallistic value TODO fee changes have no affect
     )
 
     candles_df = mt5_lib.collect_candlesticks(
@@ -447,6 +483,22 @@ def load_exchange_rate_data(
         )
 
     return instrument, quote_ticks
+
+
+def is_same_fx_pair(
+    instrument: Instrument,
+    conversion_symbol: str,
+) -> bool:
+    conversion_base = conversion_symbol[:3]
+    conversion_quote = conversion_symbol[3:]
+
+    instrument_base = str(instrument.base_currency)
+    instrument_quote = str(instrument.quote_currency)
+
+    return (
+        {instrument_base, instrument_quote}
+        == {conversion_base, conversion_quote}
+    )
 
 
 def run_symbol_backtest(
@@ -481,6 +533,8 @@ def run_symbol_backtest(
     bar_type = BarType.from_str(f"{symbol}.SIM-{bar_time}-LAST-EXTERNAL")
     bars = get_backtest_bars(bar_type, instrument, ema_df)
 
+    account_currency = Currency.from_str(order_configs["base_currency"])
+
     strategy = EMACross(
         EMACrossConfig(
             instrument_id=instrument.id,
@@ -490,7 +544,8 @@ def run_symbol_backtest(
             contract_size=contract_size,
             ema_df=ema_df,
             bar_type=bar_type,
-            statistics=statistics
+            statistics=statistics,
+            account_currency=account_currency
         ),
     )
 
@@ -503,16 +558,15 @@ def run_symbol_backtest(
         account_currency=account_currency,
     )
     
-    if exchange_rate_symbol  is not None:
-        (
-            exchange_rate_instrument,
-            exchange_rate_quotes,
-        ) = load_exchange_rate_data(
+    if exchange_rate_symbol is not None:
+        exchange_rate_instrument, exchange_rate_quotes = load_exchange_rate_data(
             symbol=exchange_rate_symbol,
             symbol_configs=symbol_configs,
         )
 
-        backtest_engine.add_instrument(exchange_rate_instrument)
+        if not is_same_fx_pair(instrument, exchange_rate_symbol):
+            backtest_engine.add_instrument(exchange_rate_instrument)
+
         backtest_engine.add_data(exchange_rate_quotes)
 
     backtest_engine.add_strategy(strategy)
