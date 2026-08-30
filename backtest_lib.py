@@ -78,7 +78,7 @@ class EMACrossConfig(StrategyConfig, frozen=True):
     statistics: BacktestStatistics
     account_currency: Currency
 
-
+# TODO: Evaluate mt5-connector as an alternative to the custom MT5 integration
 class EMACross(Strategy):
     def __init__(self, config: EMACrossConfig):
         super().__init__(config)
@@ -154,12 +154,22 @@ class EMACross(Strategy):
             stop_loss=stop_loss,
         )
         if lot_size is None:
+            # TODO: Review custom position sizing against Nautilus margin/risk APIs
             self.stats.margin_rejections += 1
             return None
 
         return instrument.make_qty(
             Decimal(str(lot_size)) * self.config.contract_size
         )
+
+
+    # TODO: Model FTMO symbol spreads / execution costs
+    # TODO: Model FTMO trading commissions by symbol group
+    # TODO: Model FTMO 0.7% realised-P/L currency conversion adjustment
+    # TODO: Model overnight swaps
+    # TODO: Model dividend adjustments where applicable
+    # TODO: Model symbol-specific trading hours / holidays / DST
+    # TODO: Model slippage / volume-band execution
 
     def buy(self, entry_price: float, stop_loss: float, take_profit: float) -> None:
         instrument = self.cache.instrument(self.config.instrument_id)
@@ -223,7 +233,7 @@ class EMACross(Strategy):
     ) -> Money:
         realized_pnl = event.realized_pnl
 
-        if realized_pnl.currency == self.config.account_currency:
+        if realized_pnl.currency == self.config.account_currency: # TODO check if account_currency gets updated after each trade
             return Money(0, self.config.account_currency)
 
         pnl = Decimal(str(realized_pnl.as_double()))
@@ -480,6 +490,7 @@ def load_exchange_rate_data(
                 ts_event=timestamp,
                 ts_init=timestamp,
             )
+            # TODO: Replace synthetic conversion QuoteTicks with MT5 bid/ask data when available
         )
 
     return instrument, quote_ticks
@@ -580,6 +591,9 @@ def create_backtest_engine(
     backtest_engine = BacktestEngine(
         config=BacktestEngineConfig(logging=LoggingConfig(log_level="ERROR"))
     )
+    # TODO: Move historical MT5 data into a Nautilus ParquetDataCatalog and evaluate 
+    # BacktestNode. BacktestNode is more abstract and higher level than BacktestEngine.
+    # Potentially a worth while switch.
     backtest_engine.add_venue(
         venue=Venue("SIM"),
         oms_type=OmsType.HEDGING,
@@ -601,6 +615,8 @@ def run_backtest(
         account_balance = mt5_lib.get_account_balance()
     else:
         account_balance = MOCK_ACCOUNT_BALANCE
+
+    # TODO: Verify all FX conversion/accounting behavior is delegated to Nautilus
 
     statistics = BacktestStatistics()
 
