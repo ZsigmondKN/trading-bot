@@ -8,7 +8,8 @@ import ema_lib
 import mt5_lib
 import order_lib
 
-
+# TODO: Add systematic strategy parameter optimisation once backtest model is stable.
+# Most likely Optuna. 
 def ema_cross_strategy(
     symbol: str,
     symbol_configs: dict[str, str],

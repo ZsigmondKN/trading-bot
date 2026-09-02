@@ -3,7 +3,6 @@ Author: Zsigmond Kovacs-Nagy
 Description: ...
 """
 
-from datetime import datetime
 from decimal import Decimal
 import logging
 import os
@@ -40,7 +39,6 @@ class BacktestStatistics:
         self.orders_submitted = 0
         self.positions_closed_by_opposite_signal = 0
         self.backtest_wind_down_closures = 0
-        self.positions_closed = 0
 
     def reset(self) -> None:
         self.signals_generated = 0
@@ -48,19 +46,23 @@ class BacktestStatistics:
         self.orders_submitted = 0
         self.positions_closed_by_opposite_signal = 0
         self.backtest_wind_down_closures = 0
-        self.positions_closed = 0
 
-    def report(self, symbol: str) -> None:
+    def report(self, symbol: str, cache, result, base_currency) -> None:
+        positions_closed = len(cache.positions_closed())
+        pnl_stats = result.stats_pnls.get(base_currency, {})
         logging.info(
             (
                 f"For symbol {symbol}, trade signals: {self.signals_generated}, "
-                f"margin rejections: {self.margin_rejections}, "
-                f"orders submitted: {self.orders_submitted},\n"
+                f"orders submitted: {self.orders_submitted}, "
+                f"positions closed: {positions_closed},\n"
                 f"{LOGGING_INDENT}positions closed by opposite signal: "
                 f"{self.positions_closed_by_opposite_signal}, "
+                f"margin rejections: {self.margin_rejections}, "
                 f"backtest wind down closures: "
-                f"{self.backtest_wind_down_closures}, "
-                f"positions closed: {self.positions_closed}.\n"
+                f"{self.backtest_wind_down_closures},\n"
+                f"{LOGGING_INDENT}PnL: {pnl_stats.get('PnL (total)'):.2f}, "
+                f"PnL %: {pnl_stats.get('PnL% (total)'):.2f}%, "
+                f"win rate: {pnl_stats.get('Win Rate'):.2%}.\n"
             )
         )
 
@@ -75,8 +77,10 @@ class EMACrossConfig(StrategyConfig, frozen=True):
     max_margin_utilisation: float
     contract_size: Decimal
     ema_df: pd.DataFrame
-    statistics: BacktestStatistics
+    backtest_statistics: BacktestStatistics
     account_currency: Currency
+    # TODO: Investigate Nautilus's official external-data loading workflow for integrating MT5 historical data.
+
 
 # TODO: Evaluate mt5-connector as an alternative to the custom MT5 integration
 class EMACross(Strategy):
@@ -84,7 +88,7 @@ class EMACross(Strategy):
         super().__init__(config)
 
         self.ema_df = config.ema_df
-        self.stats = config.statistics
+        self.stats = config.backtest_statistics
         self.current_row = 0
 
     def on_start(self) -> None:
@@ -249,8 +253,6 @@ class EMACross(Strategy):
         )
 
     def on_position_closed(self, event: PositionClosed) -> None:
-        self.stats.positions_closed += 1
-
         adjustment = self._calculate_conversion_adjustment(event)
 
         if adjustment.as_double() == 0:
@@ -518,7 +520,7 @@ def run_symbol_backtest(
     symbol_configs: dict,
     order_configs: dict,
     strategy_configs: dict,
-    statistics: BacktestStatistics,
+    backtest_statistics: BacktestStatistics,
 ) -> None:
     symbol_info = mt5_lib.get_symbol_info(symbol)
 
@@ -555,7 +557,7 @@ def run_symbol_backtest(
             contract_size=contract_size,
             ema_df=ema_df,
             bar_type=bar_type,
-            statistics=statistics,
+            backtest_statistics=backtest_statistics,
             account_currency=account_currency
         ),
     )
@@ -618,7 +620,7 @@ def run_backtest(
 
     # TODO: Verify all FX conversion/accounting behavior is delegated to Nautilus
 
-    statistics = BacktestStatistics()
+    backtest_statistics = BacktestStatistics()
 
     for symbol in symbol_configs["symbols"]:
         backtest_engine = create_backtest_engine(
@@ -634,12 +636,20 @@ def run_backtest(
             symbol_configs=symbol_configs,
             order_configs=order_configs,
             strategy_configs=strategy_configs,
-            statistics=statistics
+            backtest_statistics=backtest_statistics
         )
 
         backtest_engine.run()
-        statistics.report(symbol)
-        statistics.reset()
+
+        result = backtest_engine.get_result()
+        backtest_statistics.report(
+            symbol=symbol,
+            cache=backtest_engine.cache,
+            result=result,
+            base_currency=order_configs["base_currency"]
+
+        )
+        backtest_statistics.reset()
 
         tearsheet_name = f".\\reports\\backtest_tearsheet_{symbol}.html"
         create_tearsheet(
