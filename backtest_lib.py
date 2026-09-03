@@ -52,7 +52,7 @@ class BacktestStatistics:
         pnl_stats = result.stats_pnls.get(base_currency, {})
         logging.info(
             (
-                f"For symbol {symbol}, trade signals: {self.signals_generated}, "
+                f"For symbol {symbol} - trade signals: {self.signals_generated}, "
                 f"orders submitted: {self.orders_submitted}, "
                 f"positions closed: {positions_closed},\n"
                 f"{LOGGING_INDENT}positions closed by opposite signal: "
@@ -82,7 +82,6 @@ class EMACrossConfig(StrategyConfig, frozen=True):
     # TODO: Investigate Nautilus's official external-data loading workflow for integrating MT5 historical data.
 
 
-# TODO: Evaluate mt5-connector as an alternative to the custom MT5 integration
 class EMACross(Strategy):
     def __init__(self, config: EMACrossConfig):
         super().__init__(config)
@@ -331,6 +330,8 @@ def create_instrument_from_mt5(
             f"decimal places than MT5 digits={digits}."
         )
 
+    per_fill_commission = Decimal(str(order_commission)) / Decimal("2")
+
     common_kwargs = dict(
         instrument_id=InstrumentId.from_str(f"{symbol_info.name}.SIM"),
         raw_symbol=Symbol(symbol_info.name),
@@ -345,8 +346,8 @@ def create_instrument_from_mt5(
         lot_size=Quantity.from_str(str(contract_size)),
         max_quantity=Quantity.from_str(str(max_quantity)),
         min_quantity=Quantity.from_str(str(min_quantity)),
-        maker_fee=Decimal(str(order_commission)),
-        taker_fee=Decimal(str(order_commission))
+        maker_fee=per_fill_commission,
+        taker_fee=per_fill_commission
     )
 
     if instrument_class is CurrencyPair:
@@ -607,6 +608,34 @@ def create_backtest_engine(
     return backtest_engine
 
 
+def log_position_commissions(backtest_engine: BacktestEngine) -> None:
+    for position in backtest_engine.cache.positions_closed():
+        instrument = backtest_engine.cache.instrument(position.instrument_id)
+
+        position_size = position.peak_qty
+        lot_size = instrument.lot_size
+        lot_count = position_size / lot_size
+
+        total_commission = sum(
+            (commission.as_decimal() for commission in position.commissions()),
+            Decimal("0"),
+        )
+
+        commission_per_lot = (
+            total_commission / lot_count
+            if lot_count
+            else Decimal("0")
+        )
+
+        logging.debug(
+            f"Position {position.id}: "
+            f"peak_quantity={position_size.as_decimal():.2f}, "
+            f"lots={lot_count:.4f}, "
+            f"total_commission={total_commission}, "
+            f"commission_per_lot={commission_per_lot:.4f}"
+        )
+
+
 def run_backtest(
     symbol_configs: dict,
     order_configs: dict,
@@ -642,6 +671,7 @@ def run_backtest(
         backtest_engine.run()
 
         result = backtest_engine.get_result()
+        log_position_commissions(backtest_engine)
         backtest_statistics.report(
             symbol=symbol,
             cache=backtest_engine.cache,
