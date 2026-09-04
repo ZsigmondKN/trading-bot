@@ -12,6 +12,7 @@ import webbrowser
 import MetaTrader5 as mt5
 from nautilus_trader.analysis import create_tearsheet
 from nautilus_trader.backtest.engine import BacktestEngine
+from nautilus_trader.backtest.models import FeeModel
 from nautilus_trader.config import BacktestEngineConfig, LoggingConfig, StrategyConfig
 from nautilus_trader.model import Money, Currency
 from nautilus_trader.model.data import Bar, BarType, QuoteTick
@@ -22,6 +23,7 @@ from nautilus_trader.model.events import PositionClosed
 from nautilus_trader.model.identifiers import InstrumentId, Symbol, Venue
 from nautilus_trader.model.instruments import Instrument, Cfd, CurrencyPair
 from nautilus_trader.model.objects import Price, Quantity
+from nautilus_trader.model.orders import Order
 from nautilus_trader.persistence.wranglers import BarDataWrangler
 from nautilus_trader.trading.strategy import Strategy
 import pandas as pd
@@ -65,6 +67,51 @@ class BacktestStatistics:
                 f"win rate: {pnl_stats.get('Win Rate'):.2%}.\n"
             )
         )
+
+
+class FTMOFeeModel(FeeModel):
+    def __init__(
+        self,
+        fx_commission_usd_per_lot: Decimal,
+        cfd_commission_percent: Decimal,
+    ):
+        super().__init__()
+        self.fx_commission_currency = Currency.from_str("USD")
+        self.fx_commission_usd_per_lot = fx_commission_usd_per_lot
+        self.cfd_commission_percent = cfd_commission_percent
+
+    def get_commission(
+        self,
+        order: Order,
+        fill_quantity: Quantity,
+        fill_px: Price,
+        instrument: Instrument,
+    ) -> Money:
+        if isinstance(instrument, CurrencyPair):
+            lot_count = (fill_quantity.as_decimal() / instrument.lot_size.as_decimal())
+            commission = (lot_count * self.fx_commission_usd_per_lot / Decimal("2"))
+
+            if self.fx_commission_currency == instrument.base_currency:
+                return Money.from_decimal(
+                    commission * fill_px.as_decimal(), instrument.quote_currency
+                )
+
+            return Money.from_decimal(commission, self.fx_commission_currency)
+        
+        if isinstance(instrument, Cfd):
+            commission = (fill_quantity.as_decimal()
+                * fill_px.as_decimal()
+                * self.cfd_commission_percent
+                / Decimal("2")
+            )
+
+            return Money.from_decimal(commission, instrument.quote_currency)
+
+        raise NotImplementedError(
+            f"No FTMO commission rule implemented for "
+            f"{type(instrument).__name__}: {instrument.id}"
+        )
+
 
 # TODO make adjustable
 CURRENCY_CONVERSION_FEE = Decimal("0.007")
@@ -289,7 +336,6 @@ def get_decimal_precision(value: Decimal) -> int: # TODO add stuff like this to 
 def create_instrument_from_mt5(
         symbol_info: mt5.SymbolInfo,
         instrument_class: type[Instrument],
-        order_commission: float,
         asset_class: AssetClass | None = None,
         base_currency: str | None = None,
         quote_currency: str | None = None
@@ -330,8 +376,6 @@ def create_instrument_from_mt5(
             f"decimal places than MT5 digits={digits}."
         )
 
-    per_fill_commission = Decimal(str(order_commission)) / Decimal("2")
-
     common_kwargs = dict(
         instrument_id=InstrumentId.from_str(f"{symbol_info.name}.SIM"),
         raw_symbol=Symbol(symbol_info.name),
@@ -345,9 +389,7 @@ def create_instrument_from_mt5(
         base_currency=Currency.from_str(currency_base),
         lot_size=Quantity.from_str(str(contract_size)),
         max_quantity=Quantity.from_str(str(max_quantity)),
-        min_quantity=Quantity.from_str(str(min_quantity)),
-        maker_fee=per_fill_commission,
-        taker_fee=per_fill_commission
+        min_quantity=Quantity.from_str(str(min_quantity))
     )
 
     if instrument_class is CurrencyPair:
@@ -358,54 +400,40 @@ def create_instrument_from_mt5(
 
 def create_fx(
         symbol_info: mt5.SymbolInfo,
-        order_commission: float,
         base_currency: str | None = None,
         quote_currency: str | None = None,
     ) -> CurrencyPair:
     return create_instrument_from_mt5(
         symbol_info=symbol_info,
         instrument_class=CurrencyPair,
-        order_commission=order_commission,
         base_currency=base_currency,
         quote_currency=quote_currency
     )
 
 
-def create_cfd(
-        symbol_info: mt5.SymbolInfo,
-        order_commission: float,
-    ) -> Cfd:
+def create_cfd(symbol_info: mt5.SymbolInfo) -> Cfd:
     return create_instrument_from_mt5(
         symbol_info=symbol_info,
         instrument_class=Cfd,
         # The asset class is arbitrary assigned as there is no reliable way to 
         # automatically retrieve it. Additionally it has no effect on backtesting results.
         asset_class=AssetClass.COMMODITY,
-        order_commission=order_commission
     )
 
 
-def create_instrument(symbol_info: mt5.SymbolInfo, order_configs: dict) -> Instrument:
+def create_instrument(symbol_info: mt5.SymbolInfo) -> Instrument:
     if symbol_info is None:
         raise RuntimeError("MT5 symbol was not found.")
 
     if symbol_info.trade_calc_mode == mt5.SYMBOL_CALC_MODE_FOREX:
-        return create_fx(
-            symbol_info=symbol_info,
-            # TODO since the fee for this is in usd/lot the a seperate function will be required
-            # to calculate it and then turn it into the account currency if different.
-            order_commission=order_configs["cfd_commission_percent"] # Temp value
-        )
+        return create_fx(symbol_info)
 
     if symbol_info.trade_calc_mode in (
         mt5.SYMBOL_CALC_MODE_CFD,
         mt5.SYMBOL_CALC_MODE_CFDINDEX,
         mt5.SYMBOL_CALC_MODE_CFDLEVERAGE,
     ):
-        return create_cfd(
-            symbol_info=symbol_info,
-            order_commission=order_configs["cfd_commission_percent"]
-        )
+        return create_cfd(symbol_info)
 
     raise NotImplementedError(
         f"Unsupported MT5 trade calculation mode "
@@ -464,10 +492,8 @@ def load_exchange_rate_data(
 ) -> tuple[Instrument, list[QuoteTick]]:
     symbol_info = mt5_lib.get_symbol_info(symbol)
 
-    instrument = create_fx(
-        symbol_info=symbol_info,
-        order_commission=0.004, # TODO find and add reallistic value TODO fee changes have no affect
-    )
+    # TODO Conversion-rate data currently uses zero-spread, update and verify with real value 
+    instrument = create_fx(symbol_info)
 
     candles_df = mt5_lib.collect_candlesticks(
         symbol=symbol,
@@ -525,10 +551,7 @@ def run_symbol_backtest(
 ) -> None:
     symbol_info = mt5_lib.get_symbol_info(symbol)
 
-    instrument = create_instrument(
-        symbol_info=symbol_info, 
-        order_configs=order_configs
-    )
+    instrument = create_instrument(symbol_info)
     contract_size = mt5_lib.get_trade_contract_size(symbol_info)
 
     candles_df = mt5_lib.collect_candlesticks(
@@ -571,6 +594,9 @@ def run_symbol_backtest(
         instrument=instrument,
         account_currency=account_currency,
     )
+
+    # TODO: FX commission works correctly for USD-based accounts, but not for non-USD ones
+    # implement USD-to-account-currency conversion for non-USD accounts.
     
     if exchange_rate_symbol is not None:
         exchange_rate_instrument, exchange_rate_quotes = load_exchange_rate_data(
@@ -589,8 +615,14 @@ def run_symbol_backtest(
 def create_backtest_engine(
     account_balance: float,
     base_currency: str,
-) -> BacktestEngine:
+    fx_commission_usd_per_lot: Decimal,
+    cfd_commission_percent: Decimal,
+) -> tuple[BacktestEngine, FTMOFeeModel]:
     currency = Currency.from_str(base_currency)
+    fee_model = FTMOFeeModel(
+        fx_commission_usd_per_lot=fx_commission_usd_per_lot,
+        cfd_commission_percent=cfd_commission_percent,
+    )
     backtest_engine = BacktestEngine(
         config=BacktestEngineConfig(logging=LoggingConfig(log_level="ERROR"))
     )
@@ -603,12 +635,16 @@ def create_backtest_engine(
         account_type=AccountType.MARGIN,
         starting_balances=[Money(account_balance, currency)],
         base_currency=currency,
+        fee_model=fee_model
     )
 
-    return backtest_engine
+    return backtest_engine, fee_model
 
 
-def log_position_commissions(backtest_engine: BacktestEngine) -> None:
+def log_position_commissions(
+    backtest_engine: BacktestEngine,
+    fee_model: FTMOFeeModel
+) -> None:
     for position in backtest_engine.cache.positions_closed():
         instrument = backtest_engine.cache.instrument(position.instrument_id)
 
@@ -616,8 +652,9 @@ def log_position_commissions(backtest_engine: BacktestEngine) -> None:
         lot_size = instrument.lot_size
         lot_count = position_size / lot_size
 
+        commissions = position.commissions()
         total_commission = sum(
-            (commission.as_decimal() for commission in position.commissions()),
+            (commission.as_decimal() for commission in commissions),
             Decimal("0"),
         )
 
@@ -627,12 +664,35 @@ def log_position_commissions(backtest_engine: BacktestEngine) -> None:
             else Decimal("0")
         )
 
+        commission_currency = (
+            str(commissions[0].currency)
+            if commissions
+            else "N/A"
+        )
+        
+        if isinstance(instrument, CurrencyPair):
+            quantity_unit = str(instrument.base_currency)
+            commission_rate = "commission/lot"
+            commission_rate_val = (
+                f"{commission_per_lot:.2f} {commission_currency}/lot"
+            )
+        elif isinstance(instrument, Cfd):
+            quantity_unit = "contracts"
+            commission_rate = "commission/volume"
+            commission_rate_val = (
+                f"{fee_model.cfd_commission_percent * Decimal('100'):.4f}%"
+            )
+        else:
+            quantity_unit = "units"
+            commission_rate = "N/A"
+            commission_rate_val = "..."
+
         logging.debug(
-            f"Position {position.id}: "
-            f"peak_quantity={position_size.as_decimal():.2f}, "
-            f"lots={lot_count:.4f}, "
-            f"total_commission={total_commission}, "
-            f"commission_per_lot={commission_per_lot:.4f}"
+            f"Position = {position.id}: "
+            f"quantity = {position_size.as_decimal():.2f} {quantity_unit}, "
+            f"lots = {lot_count:.4f}, "
+            f"commission = {total_commission} {commission_currency}, "
+            f"{commission_rate} = {commission_rate_val}"
         )
 
 
@@ -652,9 +712,15 @@ def run_backtest(
     backtest_statistics = BacktestStatistics()
 
     for symbol in symbol_configs["symbols"]:
-        backtest_engine = create_backtest_engine(
+        backtest_engine, fee_model = create_backtest_engine(
             account_balance=account_balance,
             base_currency=order_configs["base_currency"],
+            fx_commission_usd_per_lot=Decimal(
+                str(order_configs["fx_commission_usd_per_lot"])
+            ),
+            cfd_commission_percent=Decimal(
+                str(order_configs["cfd_commission_percent"])
+            ),
         )
 
         logging.info(f"Running backtest on {symbol} symbol.")
@@ -671,13 +737,15 @@ def run_backtest(
         backtest_engine.run()
 
         result = backtest_engine.get_result()
-        log_position_commissions(backtest_engine)
+        log_position_commissions(
+            backtest_engine=backtest_engine,
+            fee_model=fee_model
+        )
         backtest_statistics.report(
             symbol=symbol,
             cache=backtest_engine.cache,
             result=result,
             base_currency=order_configs["base_currency"]
-
         )
         backtest_statistics.reset()
 
