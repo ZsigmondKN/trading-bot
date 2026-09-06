@@ -170,12 +170,20 @@ def collect_candlesticks(
     return candles_df
 
 
-def get_account_balance() -> float:
+def get_account_info() -> mt5.AccountInfo:
     account_info = mt5.account_info()
     if account_info is None:
         raise RuntimeError(f"Unable to retrieve account information: {mt5.last_error()}")
 
-    return account_info.balance
+    return account_info
+
+
+def log_account_details() -> None:
+    account_info = get_account_info()
+    logging.info(
+        f"Using an account with a {account_info.balance:.2f} {account_info.currency} "
+        f"starting balance."
+    )
 
 
 def get_symbol_info(symbol: str) -> mt5.SymbolInfo:

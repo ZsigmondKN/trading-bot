@@ -32,6 +32,7 @@ def main() -> None:
     )
 
     mt5_lib.login(mt5_configs)
+    mt5_lib.log_account_details()
     mt5_lib.validate_and_initialise_symbols(symbol_configs)
 
     trading_mode = mt5_configs["trading_mode"]

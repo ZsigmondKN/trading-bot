@@ -38,6 +38,7 @@ class SymbolInfo:
 
 class AccountInfo:
     balance: float
+    currency: str
 
 
 class MT5Result(Protocol):

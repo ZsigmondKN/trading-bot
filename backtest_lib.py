@@ -28,7 +28,7 @@ from nautilus_trader.persistence.wranglers import BarDataWrangler
 from nautilus_trader.trading.strategy import Strategy
 import pandas as pd
 
-from config import LOGGING_INDENT, MOCK_ACCOUNT_BALANCE, MT5_TIMEFRAME_TO_NAUTILUS_BAR
+from config import LOGGING_INDENT, MOCK_ACCOUNT_INFO, MT5_TIMEFRAME_TO_NAUTILUS_BAR
 import ema_lib
 import mt5_lib
 import order_lib
@@ -62,8 +62,9 @@ class BacktestStatistics:
                 f"margin rejections: {self.margin_rejections}, "
                 f"backtest wind down closures: "
                 f"{self.backtest_wind_down_closures},\n"
-                f"{LOGGING_INDENT}PnL: {pnl_stats.get('PnL (total)'):.2f}, "
-                f"PnL %: {pnl_stats.get('PnL% (total)'):.2f}%, "
+                f"{LOGGING_INDENT}PnL: "
+                f"{pnl_stats.get('PnL (total)'):.2f} {base_currency}, "
+                f"PnL(%): {pnl_stats.get('PnL% (total)'):.2f}%, "
                 f"win rate: {pnl_stats.get('Win Rate'):.2%}.\n"
             )
         )
@@ -441,7 +442,7 @@ def create_instrument(symbol_info: mt5.SymbolInfo) -> Instrument:
     )
 
 
-def get_backtest_bars(
+def get_backtest_bars( #TODO see if this function can be avoided
     bar_type: BarType,
     instrument: Instrument,
     ema_df: pd.DataFrame
@@ -492,7 +493,8 @@ def load_exchange_rate_data(
 ) -> tuple[Instrument, list[QuoteTick]]:
     symbol_info = mt5_lib.get_symbol_info(symbol)
 
-    # TODO Conversion-rate data currently uses zero-spread, update and verify with real value 
+    # TODO Conversion-rate data currently uses zero-spread, update and verify 
+    # with real value.
     instrument = create_fx(symbol_info)
 
     candles_df = mt5_lib.collect_candlesticks(
@@ -519,7 +521,8 @@ def load_exchange_rate_data(
                 ts_event=timestamp,
                 ts_init=timestamp,
             )
-            # TODO: Replace synthetic conversion QuoteTicks with MT5 bid/ask data when available
+            # TODO: Replace synthetic conversion QuoteTicks with MT5 bid/ask 
+            # data when available
         )
 
     return instrument, quote_ticks
@@ -570,7 +573,12 @@ def run_symbol_backtest(
     bar_type = BarType.from_str(f"{symbol}.SIM-{bar_time}-LAST-EXTERNAL")
     bars = get_backtest_bars(bar_type, instrument, ema_df)
 
-    account_currency = Currency.from_str(order_configs["base_currency"])
+    account_currency = mt5_lib.get_account_info().currency
+    exchange_rate_symbol  = get_conversion_symbol(
+        instrument=instrument,
+        account_currency=account_currency,
+    )
+    account_currency = Currency.from_str(account_currency)
 
     strategy = EMACross(
         EMACrossConfig(
@@ -588,12 +596,6 @@ def run_symbol_backtest(
 
     backtest_engine.add_instrument(instrument)
     backtest_engine.add_data(bars)
-
-    account_currency = order_configs["base_currency"]
-    exchange_rate_symbol  = get_conversion_symbol(
-        instrument=instrument,
-        account_currency=account_currency,
-    )
 
     # TODO: FX commission works correctly for USD-based accounts, but not for non-USD ones
     # implement USD-to-account-currency conversion for non-USD accounts.
@@ -654,8 +656,7 @@ def log_position_commissions(
 
         commissions = position.commissions()
         total_commission = sum(
-            (commission.as_decimal() for commission in commissions),
-            Decimal("0"),
+            (commission.as_decimal() for commission in commissions), Decimal("0")
         )
 
         commission_per_lot = (
@@ -672,13 +673,13 @@ def log_position_commissions(
         
         if isinstance(instrument, CurrencyPair):
             quantity_unit = str(instrument.base_currency)
-            commission_rate = "commission/lot"
+            commission_rate = "comm/lot"
             commission_rate_val = (
                 f"{commission_per_lot:.2f} {commission_currency}/lot"
             )
         elif isinstance(instrument, Cfd):
             quantity_unit = "contracts"
-            commission_rate = "commission/volume"
+            commission_rate = "comm/vol"
             commission_rate_val = (
                 f"{fee_model.cfd_commission_percent * Decimal('100'):.4f}%"
             )
@@ -688,10 +689,12 @@ def log_position_commissions(
             commission_rate_val = "..."
 
         logging.debug(
-            f"Position = {position.id}: "
-            f"quantity = {position_size.as_decimal():.2f} {quantity_unit}, "
+            f"Pos {position.id}: "
+            f"qty = {position_size.as_decimal():.2f} {quantity_unit}, "
             f"lots = {lot_count:.4f}, "
-            f"commission = {total_commission} {commission_currency}, "
+            f"PnL = {position.realized_pnl.as_decimal():.2f} "
+            f"{position.realized_pnl.currency}, "
+            f"comm = {total_commission} {commission_currency}, "
             f"{commission_rate} = {commission_rate_val}"
         )
 
@@ -700,12 +703,12 @@ def run_backtest(
     symbol_configs: dict,
     order_configs: dict,
     strategy_configs: dict,
-    use_real_account_balance: bool = True,
+    use_real_account_info: bool = True,
 ) -> None:
-    if use_real_account_balance:
-        account_balance = mt5_lib.get_account_balance()
+    if use_real_account_info:
+        account_info = mt5_lib.get_account_info()
     else:
-        account_balance = MOCK_ACCOUNT_BALANCE
+        account_info = MOCK_ACCOUNT_INFO
 
     # TODO: Verify all FX conversion/accounting behavior is delegated to Nautilus
 
@@ -713,8 +716,8 @@ def run_backtest(
 
     for symbol in symbol_configs["symbols"]:
         backtest_engine, fee_model = create_backtest_engine(
-            account_balance=account_balance,
-            base_currency=order_configs["base_currency"],
+            account_balance=account_info.balance,
+            base_currency=account_info.currency,
             fx_commission_usd_per_lot=Decimal(
                 str(order_configs["fx_commission_usd_per_lot"])
             ),
@@ -745,7 +748,7 @@ def run_backtest(
             symbol=symbol,
             cache=backtest_engine.cache,
             result=result,
-            base_currency=order_configs["base_currency"]
+            base_currency=account_info.currency
         )
         backtest_statistics.reset()
 

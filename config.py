@@ -6,6 +6,7 @@ Description: ...
 from datetime import datetime, timezone
 import logging
 import os
+from types import SimpleNamespace
 from typing import Any
 
 import MetaTrader5 as mt5
@@ -31,7 +32,11 @@ MT5_TIMEFRAME_TO_NAUTILUS_BAR = {
     "H4": "4-HOUR",
     "D1": "1-DAY",
 }
-MOCK_ACCOUNT_BALANCE = 500000
+
+MOCK_ACCOUNT_INFO = SimpleNamespace(
+    balance=500000.0,
+    currency="USD",
+)
 
 # EMA strategy constants
 EMA_CROSS_STRATEGY = "ema_cross_strategy"
@@ -85,7 +90,6 @@ def load_symbol_configs() -> dict[str, Any]:
 
 def load_order_configs() -> dict[str, Any]:
     return {
-        "base_currency": getenv_required("BASE_CURRENCY"),
         "risk_reward_ratio": float(getenv_required("RISK_REWARD_RATIO")),
         "risk_percentage_per_trade": float(
             getenv_required("RISK_PERCENTAGE_PER_TRADE")

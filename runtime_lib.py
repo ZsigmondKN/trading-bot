@@ -28,7 +28,6 @@ def log_setup_config(
 
     risk_reward_ratio = order_configs["risk_reward_ratio"]
     risk_percentage_per_trade = order_configs["risk_percentage_per_trade"]
-    base_currency = order_configs["base_currency"]
     max_margin_utilisation = order_configs["max_margin_utilisation"]
 
 
@@ -43,8 +42,7 @@ def log_setup_config(
         f"a max margin utilisation per trade of {max_margin_utilisation * 100}%."
     )
     logging.info(
-        f"Using a base currency of {base_currency} and "
-        f"a risk-reward ratio of 1:{risk_reward_ratio}.\n"
+        f"Using a risk-reward ratio of 1:{risk_reward_ratio}.\n"
     )
 
 
